@@ -7,6 +7,6 @@
   "documentation": "https://github.com/cmos486/ring-intercom-video",
   "issue_tracker": "https://github.com/cmos486/ring-intercom-video/issues",
   "iot_class": "cloud_push",
-  "requirements": ["Pillow>=10.0.0", "websockets>=12.0", "aiortc>=1.15.0"],
+  "requirements": ["Pillow>=10.0.0", "websockets>=12.0", "aiortc @ https://github.com/aiortc/aiortc/archive/00c77cad44d8ee7cf2e6c904bef30dc056857d74.tar.gz#sha256=80a96046d33886c57e59205f79e67201e421e50ea649a96b7c48b871d4e90dfb"],
   "version": "0.5.1"
 }
