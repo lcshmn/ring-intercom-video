@@ -166,21 +166,32 @@ snapshots pinned to the cache). Bear in mind that a wallpanel permanently displa
 
 ---
 
-## 🔔 Recipe: fresh snapshot in doorbell notifications (HomeKit & co.)
+## 🔔 Recipe: instant doorbell notifications with a snapshot (HomeKit & co.)
 
-A capture takes a few seconds (Ring signaling, WebRTC setup, waiting for a stable frame). If the notification
-fires on the ding itself, the notifier fetches the picture *before* the new one exists and shows the previous
-visitor. Fire the notification after the snapshot is written instead:
+Someone is waiting at the door, so the notification should go out immediately — but a capture takes a moment
+(typically 1.5–3 s: Ring signaling, WebRTC setup, waiting for a stable frame). A notifier such as HomeKit
+fetches the picture the instant the doorbell fires and doesn't update it afterwards, so firing on the ding
+alone shows the *previous* visitor.
+
+The recipe below rings right away with a neutral placeholder picture, then takes the real snapshot. The
+placeholder is copied in milliseconds, so the notification is never delayed and never shows a stale visitor;
+the fresh picture is in the file a couple of seconds later (Home app tile, expanded notification, dashboards).
 
 ```yaml
-# configuration.yaml — a doorbell that rings only once the picture is on disk
+# configuration.yaml
+
+# Overwrites the last snapshot with a neutral image, e.g. "Loading picture…"
+shell_command:
+  intercom_placeholder: cp /config/www/intercom_placeholder.jpg /config/www/intercom_snapshot.jpg
+
+# Doorbell for HomeKit: rings once the placeholder is in place
 template:
   - trigger:
       - trigger: event
-        event_type: intercom_snapshot_ready
+        event_type: intercom_ding
     binary_sensor:
-      - name: Intercom doorbell ready
-        unique_id: intercom_doorbell_ready
+      - name: Intercom doorbell
+        unique_id: intercom_doorbell
         state: "true"
         auto_off: 5
 
@@ -199,20 +210,34 @@ triggers:
     not_from: [unavailable, unknown]
     not_to: [unavailable, unknown]
 actions:
+  # 1. Placeholder instead of the previous visitor (milliseconds)
+  - action: shell_command.intercom_placeholder
+  # 2. Ring now
+  - event: intercom_ding
+  # 3. Optional: end open live views (e.g. a wallpanel) so the snapshot isn't black.
+  #    Leave this out if a live view must never be interrupted.
+  - action: ring_intercom_camera.close_live_sessions
+    continue_on_error: true
+    target:
+      entity_id: camera.<device_name>_camera
+  # 4. Real snapshot
   - action: camera.snapshot
-    continue_on_error: true   # still ring if the capture fails
+    continue_on_error: true
     target:
       entity_id: camera.<device_name>_camera
     data:
       filename: /config/www/intercom_snapshot.jpg
-  - event: intercom_snapshot_ready
 mode: single
 max_exceeded: silent
 ```
 
-Expose `camera.intercom_snapshot` (not the live camera) to HomeKit with
-`linked_doorbell_sensor: binary_sensor.intercom_doorbell_ready`. Every Home app refresh then reads the file
-instead of waking the intercom.
+Put a placeholder image at `/config/www/intercom_placeholder.jpg` (ideally 720×576, like the camera). Then
+expose `camera.intercom_snapshot` (not the live camera) to HomeKit with
+`linked_doorbell_sensor: binary_sensor.intercom_doorbell`. Every Home app refresh reads the file instead of
+waking the intercom.
+
+> 🧪 Test with a real ding. Triggering the automation by hand captures while the analog camera is off, so the
+> picture comes out black (see *camera behavior* above).
 
 > 🔋 The same applies to dashboards: a picture card on `camera.<device_name>_camera` refreshes every ~10 s and
 > each refresh is a new capture session. Show the `local_file` camera there and keep the live camera for the
