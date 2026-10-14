@@ -234,7 +234,11 @@ class RingIntercomCamera(Camera):
         stays as a safety net for environments where aiortc still can't load.
         """
         try:
-            from aiortc import RTCPeerConnection, RTCSessionDescription
+            from aiortc import (
+                RTCConfiguration,
+                RTCPeerConnection,
+                RTCSessionDescription,
+            )
         except ImportError:
             _LOGGER.error(
                 "aiortc not available — server-side snapshot capture is "
@@ -262,7 +266,15 @@ class RingIntercomCamera(Camera):
         def _ms() -> int:
             return int((time.monotonic() - t_start) * 1000)
 
-        pc = RTCPeerConnection()
+        # No STUN server. aiortc defaults to stun.l.google.com and aioice
+        # queries it from every local IPv4 interface — including Docker /
+        # Supervisor bridges that never get an answer — then waits its fixed
+        # 5s gathering timeout. That was most of the time before Ring was
+        # even contacted. The peer is Ring's media server on a public
+        # address: our connectivity checks reach it from host candidates
+        # and it learns our NAT-mapped address from them (peer-reflexive),
+        # so a server-reflexive candidate adds nothing here.
+        pc = RTCPeerConnection(RTCConfiguration(iceServers=[]))
         snapshot_data: dict[str, bytes | None] = {"image": None}
         capture_done = asyncio.Event()
 
@@ -358,8 +370,8 @@ class RingIntercomCamera(Camera):
             return resp.json()["ticket"]
 
         async def _make_offer() -> None:
-            # setLocalDescription includes ICE candidate gathering (a STUN
-            # round trip), so it is worth overlapping with the ticket request.
+            # setLocalDescription includes ICE candidate gathering, so it is
+            # worth overlapping with the ticket request.
             await pc.setLocalDescription(await pc.createOffer())
 
         # Neither depends on the other: run the ticket HTTP request and the
