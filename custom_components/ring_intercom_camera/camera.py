@@ -41,6 +41,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.util.ssl import client_context
 
+from .history import DingHistory, async_get_history
 from .session import get_session_tracker
 
 _LOGGER = logging.getLogger(__name__)
@@ -96,7 +97,11 @@ async def async_setup_platform(
                         "Found Ring Intercom Video: %s (id: %s)",
                         device.name, device.device_api_id,
                     )
-                    entities.append(RingIntercomCamera(hass, device))
+                    entities.append(
+                        RingIntercomCamera(
+                            hass, device, await async_get_history(hass, device)
+                        )
+                    )
         except Exception:
             _LOGGER.exception("Error discovering Ring Intercom Video devices")
 
@@ -117,10 +122,15 @@ async def async_setup_platform(
 class RingIntercomCamera(Camera):
     """WebRTC live-stream camera + server-side snapshot for Ring Intercom Video."""
 
-    def __init__(self, hass: HomeAssistant, device) -> None:
+    def __init__(
+        self, hass: HomeAssistant, device, history: DingHistory | None = None
+    ) -> None:
         """Initialize the camera."""
         super().__init__()
         self._device = device
+        self._history = history
+        if history is not None:
+            history.set_capture(self._async_fresh_image)
         self._sessions = get_session_tracker(hass, device.device_api_id)
         self._attr_name = f"{device.name} Camera"
         self._attr_unique_id = f"ring_intercom_camera_{device.device_api_id}"
@@ -209,6 +219,19 @@ class RingIntercomCamera(Camera):
         if self._capture_task is task:
             self._capture_task = None
 
+    async def _async_fresh_image(self) -> bytes | None:
+        """Return a picture of this moment, or None if only an old one exists.
+
+        For the ding history: the cache is fine if it was just captured, but
+        an image served from the cache because a live view is open may be
+        minutes old and would be filed under the wrong ding.
+        """
+        requested = time.time()
+        image = await self.async_camera_image()
+        if image and self._last_image_time >= requested - SNAPSHOT_CACHE_SECONDS:
+            return image
+        return None
+
     async def _capture_and_cache(self) -> None:
         """Run one capture and store its result in the cache."""
         try:
@@ -223,6 +246,10 @@ class RingIntercomCamera(Camera):
                 "Snapshot captured for %s (%d bytes)",
                 self._device.name, len(image),
             )
+            if self._history is not None:
+                # Any fresh capture can be the picture of a pending ding,
+                # e.g. an automation's that ran after closing live views.
+                await self._history.async_on_image(image)
 
     async def _capture_snapshot(self) -> bytes | None:
         """Server-side WebRTC snapshot using aiortc.

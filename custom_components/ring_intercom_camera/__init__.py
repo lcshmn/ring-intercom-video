@@ -11,21 +11,43 @@ Architecture:
 - When user opens the camera in Lovelace, the browser establishes WebRTC directly
 - Exposes a binary_sensor reporting whether a live view is open, because the
   device's single analog capture path allows only one consumer at a time
+- Optionally keeps a ding history (snapshot per ding, N days), exposed as an
+  image and a sensor entity — see history.py
 """
 
 from __future__ import annotations
 
 import logging
 
+import voluptuous as vol
+
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import discovery
+from homeassistant.helpers import config_validation as cv, discovery
 
-from .const import DOMAIN
+from .const import CONF_DAYS, CONF_DING_ENTITY, CONF_HISTORY, DATA_CONFIG, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR, Platform.IMAGE, Platform.SENSOR]
+
+HISTORY_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_DAYS, default=14): vol.All(int, vol.Range(min=1)),
+        # Override for when the Ring ding entity can't be found automatically.
+        vol.Optional(CONF_DING_ENTITY): cv.entity_id,
+    }
+)
+
+CONFIG_SCHEMA = vol.Schema(
+    {
+        DOMAIN: vol.Any(
+            None,
+            vol.Schema({vol.Optional(CONF_HISTORY): vol.Any(None, HISTORY_SCHEMA)}),
+        )
+    },
+    extra=vol.ALLOW_EXTRA,
+)
 
 
 def _patch_ring_other() -> None:
@@ -91,12 +113,16 @@ def _patch_ring_other() -> None:
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Ring Intercom Camera component from configuration.yaml."""
-    hass.data.setdefault(DOMAIN, {})
+    conf = dict(config.get(DOMAIN) or {})
+    if CONF_HISTORY in conf and conf[CONF_HISTORY] is None:
+        # "history:" with no options means "on, with defaults".
+        conf[CONF_HISTORY] = HISTORY_SCHEMA({})
+    hass.data.setdefault(DOMAIN, {})[DATA_CONFIG] = conf
 
     _patch_ring_other()
 
-    # Both platforms look up their per-device LiveSessionTracker from
-    # hass.data, so they can be loaded in any order.
+    # The platforms look up their per-device LiveSessionTracker and
+    # DingHistory from hass.data, so they can be loaded in any order.
     for platform in PLATFORMS:
         hass.async_create_task(
             discovery.async_load_platform(hass, platform, DOMAIN, {}, config)

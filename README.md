@@ -159,6 +159,8 @@ Two entities will appear 🎉
 | `camera.<device_name>_camera` | Live WebRTC view and snapshots |
 | `binary_sensor.<device_name>_live_session` | `on` while at least one browser holds a live view. Its `session_count` attribute gives the exact number |
 
+With the optional [ding history](#️-ding-history) enabled, an `image` and a `sensor` entity are added as well.
+
 The binary sensor exists because of the one‑consumer constraint above: use it to keep automations from
 competing with someone who is using the intercom, and to spot a stuck session count (which would keep
 snapshots pinned to the cache). Bear in mind that a wallpanel permanently displaying the card keeps it
@@ -182,7 +184,7 @@ the fresh picture is in the file a couple of seconds later (Home app tile, expan
 
 # Overwrites the last snapshot with a neutral image, e.g. "Loading picture…"
 shell_command:
-  intercom_placeholder: cp /config/www/intercom_placeholder.jpg /config/www/intercom_snapshot.jpg
+  intercom_placeholder: cp /media/intercom_placeholder.jpg /media/intercom_snapshot.jpg
 
 # Doorbell for HomeKit: rings once the placeholder is in place
 template:
@@ -198,7 +200,7 @@ template:
 camera:
   - platform: local_file
     name: Intercom snapshot
-    file_path: /config/www/intercom_snapshot.jpg
+    file_path: /media/intercom_snapshot.jpg
 ```
 
 ```yaml
@@ -206,8 +208,8 @@ camera:
 triggers:
   - trigger: state
     entity_id: event.<device_name>_ding
-    # Ignore restarts / reloads: each would wake the device for nothing
-    not_from: [unavailable, unknown]
+    # Ignore reloads: each would wake the device for nothing
+    not_from: unavailable
     not_to: [unavailable, unknown]
 actions:
   # 1. Placeholder instead of the previous visitor (milliseconds)
@@ -226,15 +228,19 @@ actions:
     target:
       entity_id: camera.<device_name>_camera
     data:
-      filename: /config/www/intercom_snapshot.jpg
+      filename: /media/intercom_snapshot.jpg
 mode: single
 max_exceeded: silent
 ```
 
-Put a placeholder image at `/config/www/intercom_placeholder.jpg` (ideally 720×576, like the camera). Then
+Put a placeholder image at `/media/intercom_placeholder.jpg` (ideally 720×576, like the camera). Then
 expose `camera.intercom_snapshot` (not the live camera) to HomeKit with
 `linked_doorbell_sensor: binary_sensor.intercom_doorbell`. Every Home app refresh reads the file instead of
 waking the intercom.
+
+> 🔐 Keep these files out of `/config/www`: everything there is served at `/local/…` **without
+> authentication**. `/media` is only reachable when logged in, and `camera.snapshot` may write there by
+> default.
 
 > 🧪 Test with a real ding. Triggering the automation by hand captures while the analog camera is off, so the
 > picture comes out black (see *camera behavior* above).
@@ -242,6 +248,49 @@ waking the intercom.
 > 🔋 The same applies to dashboards: a picture card on `camera.<device_name>_camera` refreshes every ~10 s and
 > each refresh is a new capture session. Show the `local_file` camera there and keep the live camera for the
 > live view.
+
+---
+
+## 🗂️ Ding history
+
+Optionally, the integration keeps a picture of every ding for a number of days:
+
+```yaml
+ring_intercom_camera:
+  history:
+    days: 14   # optional, default 14
+```
+
+It listens to the Ring integration's ding event itself, so no automation is needed. If an automation
+captures at the same moment (like the recipe above), both share the one capture session: the
+battery-powered device is woken only once. When a live view is open and nothing closes it, the ding is
+still recorded, just without a picture.
+
+| What | Where |
+|---|---|
+| Pictures | `/media/ring_intercom/<device_name>/<YYYY-MM-DD>/<HH-MM-SS>.jpg`, in the **media browser** under *Local media* |
+| `image.<device_name>_last_ding` | Picture of the latest ding |
+| `sensor.<device_name>_ding_history` | Time of the latest ding; attribute `entries` lists the last 50 dings |
+
+Day folders older than `days` are deleted together with their entries (checked hourly). Only folders named
+like a date are touched. If the ding entity isn't found automatically (the log says so), name it with
+`ding_entity: event.<your_ding_entity>` under `history:`.
+
+Dashboard example, no extra cards needed:
+
+```yaml
+type: vertical-stack
+cards:
+  - type: picture-entity
+    entity: image.<device_name>_last_ding
+    name: Last ding
+  - type: markdown
+    title: Dings
+    content: >-
+      {% for e in state_attr('sensor.<device_name>_ding_history', 'entries') or [] %}
+      - {{ as_timestamp(e.time) | timestamp_custom('%a %d.%m. %H:%M:%S') }}{{ '' if e.image else ' (no picture)' }}
+      {% endfor %}
+```
 
 ---
 
