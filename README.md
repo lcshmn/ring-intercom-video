@@ -168,6 +168,36 @@ snapshots pinned to the cache). Bear in mind that a wallpanel permanently displa
 
 ---
 
+## 🚪 Doorbell camera (HomeKit & co.)
+
+Besides `camera.<device_name>_camera`, the integration adds `camera.<device_name>_doorbell`: a still-image
+camera meant for doorbell notifications.
+
+HomeKit sends the doorbell notification the instant the ding arrives and asks for its picture right away,
+before any capture (typically 1.5–3 s) can be done; a camera serving a file therefore shows the
+*previous* visitor. This camera instead holds a picture request that arrives within 30 s of a ding until
+that ding's capture is done. It starts the capture itself on the ding, and the ding history and
+automations share it. The notification isn't delayed, only its picture waits for the current one. If no
+picture is ready within 8 s, or a live view is open, it answers with no picture rather than an old one.
+
+Outside that window it only ever serves the last picture and **never wakes the device**, so it is safe to
+expose to HomeKit, whose Home app refreshes camera tiles every few seconds while it is open.
+
+```yaml
+homekit:
+  - name: Front door camera
+    mode: accessory
+    filter:
+      include_entities:
+        - camera.<device_name>_doorbell
+    entity_config:
+      camera.<device_name>_doorbell:
+        linked_doorbell_sensor: event.<your_ding_entity>
+```
+
+Whether iOS shows the notification first and fills in the picture, or waits for it, is up to iOS; test it
+with a real ding. If your setup prefers a picture file, the placeholder recipe below works without it.
+
 ## 🔔 Recipe: instant doorbell notifications with a snapshot (HomeKit & co.)
 
 Someone is waiting at the door, so the notification should go out immediately — but a capture takes a moment
@@ -276,21 +306,23 @@ Day folders older than `days` are deleted together with their entries (checked h
 like a date are touched. If the ding entity isn't found automatically (the log says so), name it with
 `ding_entity: event.<your_ding_entity>` under `history:`.
 
-Dashboard example, no extra cards needed:
+### Ding history card
+
+The integration ships a dashboard card for the history and loads it into every dashboard itself (no
+resource to add, nothing in `/config/www`): the latest picture with time, a *Live* button opening the
+camera, and the recent dings grouped by day. Tap a picture to enlarge it and page through the others.
 
 ```yaml
-type: vertical-stack
-cards:
-  - type: picture-entity
-    entity: image.<device_name>_last_ding
-    name: Last ding
-  - type: markdown
-    title: Dings
-    content: >-
-      {% for e in state_attr('sensor.<device_name>_ding_history', 'entries') or [] %}
-      - {{ as_timestamp(e.time) | timestamp_custom('%a %d.%m. %H:%M:%S') }}{{ '' if e.image else ' (no picture)' }}
-      {% endfor %}
+type: custom:ring-ding-history-card
+entity: sensor.<device_name>_ding_history
+# optional:
+# title: Front door
+# max_entries: 30
+# image_entity / camera_entity: derived from entity, override if renamed
 ```
+
+The pictures stay behind authentication: the card asks Home Assistant for a signed, short-lived URL per
+picture (`media_source/resolve_media`).
 
 ---
 

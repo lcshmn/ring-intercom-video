@@ -12,15 +12,21 @@ Architecture:
 - Exposes a binary_sensor reporting whether a live view is open, because the
   device's single analog capture path allows only one consumer at a time
 - Optionally keeps a ding history (snapshot per ding, N days), exposed as an
-  image and a sensor entity — see history.py
+  image and a sensor entity — see history.py — plus a dashboard card for it
+  (frontend/ring-ding-history-card.js), served by this integration
+- Adds a doorbell camera for notifications such as HomeKit's: it holds a
+  picture request right after a ding until that ding's capture is done
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import voluptuous as vol
 
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv, discovery
@@ -30,6 +36,9 @@ from .const import CONF_DAYS, CONF_DING_ENTITY, CONF_HISTORY, DATA_CONFIG, DOMAI
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR, Platform.IMAGE, Platform.SENSOR]
+
+CARD_FILE = Path(__file__).parent / "frontend" / "ring-ding-history-card.js"
+CARD_URL = f"/{DOMAIN}/ring-ding-history-card.js"
 
 HISTORY_SCHEMA = vol.Schema(
     {
@@ -120,6 +129,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})[DATA_CONFIG] = conf
 
     _patch_ring_other()
+    await _async_register_card(hass)
 
     # The platforms look up their per-device LiveSessionTracker and
     # DingHistory from hass.data, so they can be loaded in any order.
@@ -128,3 +138,17 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             discovery.async_load_platform(hass, platform, DOMAIN, {}, config)
         )
     return True
+
+
+async def _async_register_card(hass: HomeAssistant) -> None:
+    """Serve the ding history card and load it in every dashboard.
+
+    Served from the integration's own folder rather than /config/www, so it
+    ships and updates with the integration. The file's mtime in the URL makes
+    browsers fetch a new version after an update.
+    """
+    mtime = await hass.async_add_executor_job(lambda: int(CARD_FILE.stat().st_mtime))
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(CARD_URL, str(CARD_FILE), False)]
+    )
+    add_extra_js_url(hass, f"{CARD_URL}?v={mtime}")
