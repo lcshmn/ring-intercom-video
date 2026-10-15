@@ -10,6 +10,9 @@ Two modes of operation:
    using aiortc, captures a stabilized video frame, returns JPEG.
    Works from automations without needing a browser open.
 
+A second, image-only entity (``camera.<name>_doorbell``) is meant for doorbell
+notifications such as HomeKit's linked doorbell: see RingIntercomDoorbellCamera.
+
 The two modes cannot run at the same time. The device digitizes a single
 analog CVBS signal, so a second concurrent WebRTC session receives H.264
 frames that carry no picture. Mode 2 therefore declines to start while a
@@ -35,12 +38,16 @@ from homeassistant.components.camera import (
     WebRTCError,
     WebRTCSendMessage,
 )
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
 from homeassistant.helpers import entity_platform
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
 from homeassistant.util.ssl import client_context
 
+from .const import CONF_DING_ENTITY, CONF_HISTORY, DATA_CONFIG, DOMAIN
+from .devices import find_ding_entity
 from .history import DingHistory, async_get_history
 from .session import get_session_tracker
 
@@ -51,6 +58,11 @@ SNAPSHOT_MAX_FRAMES = 75         # Max frames to examine (~3s at 25fps)
 SNAPSHOT_BRIGHTNESS_THRESHOLD = 25  # Min brightness to consider "real" video
 SNAPSHOT_STABILIZE_FRAMES = 5    # Consecutive bright frames before capture
 SNAPSHOT_CACHE_SECONDS = 10      # Don't re-capture within this window
+
+# Doorbell camera: how long after a ding a picture request waits for that
+# ding's capture, and the most it waits before giving up on it.
+DOORBELL_WINDOW_SECONDS = 30
+DOORBELL_WAIT_SECONDS = 8
 
 SERVICE_CLOSE_LIVE_SESSIONS = "close_live_sessions"
 
@@ -97,17 +109,20 @@ async def async_setup_platform(
                         "Found Ring Intercom Video: %s (id: %s)",
                         device.name, device.device_api_id,
                     )
+                    history = await async_get_history(hass, device)
+                    camera = RingIntercomCamera(hass, device, history)
+                    entities.append(camera)
                     entities.append(
-                        RingIntercomCamera(
-                            hass, device, await async_get_history(hass, device)
-                        )
+                        RingIntercomDoorbellCamera(device, camera, history)
                     )
         except Exception:
             _LOGGER.exception("Error discovering Ring Intercom Video devices")
 
     if entities:
         async_add_entities(entities)
-        _LOGGER.info("Added %d Ring Intercom Video camera(s)", len(entities))
+        _LOGGER.info(
+            "Added %d Ring Intercom Video camera(s)", len(entities) // 2
+        )
         entity_platform.async_get_current_platform().async_register_entity_service(
             SERVICE_CLOSE_LIVE_SESSIONS, {}, "async_close_live_sessions"
         )
@@ -196,11 +211,37 @@ class RingIntercomCamera(Camera):
         ):
             return self._last_image
 
-        # Join a capture that is already running instead of answering with
-        # the previous image: a caller arriving mid-capture (a doorbell
-        # automation racing a dashboard refresh, or a restarted automation
-        # run) wants the picture being taken now, and a second session would
-        # only compete for the single capture path.
+        await self._async_capture()
+        return self._last_image
+
+    @property
+    def last_image(self) -> bytes | None:
+        """Return the cached picture without capturing."""
+        return self._last_image
+
+    async def async_image_since(self, since: float) -> bytes | None:
+        """Return a picture taken at or after `since` (epoch), or None.
+
+        Captures unless the cache is already that recent. Unlike
+        async_camera_image it never falls back to an older picture: for a
+        doorbell notification, the previous visitor is worse than no picture.
+        """
+        if self._last_image and self._last_image_time >= since:
+            return self._last_image
+        if self._sessions.active:
+            # Same reason as in async_camera_image: a capture would be black.
+            return None
+        await self._async_capture()
+        return self._last_image if self._last_image_time >= since else None
+
+    async def _async_capture(self) -> None:
+        """Run a capture, joining the one in progress if there is one.
+
+        A caller arriving mid-capture (a doorbell automation racing a dashboard
+        refresh, or a restarted automation run) wants the picture being taken
+        now, and a second session would only compete for the single capture
+        path.
+        """
         task = self._capture_task
         if task is None:
             task = self._capture_task = self.hass.async_create_background_task(
@@ -212,7 +253,6 @@ class RingIntercomCamera(Camera):
         # Shielded so a cancelled caller (automation in mode: restart) doesn't
         # abort the capture for everyone else; its result is cached either way.
         await asyncio.shield(task)
-        return self._last_image
 
     @callback
     def _clear_capture_task(self, task: asyncio.Task) -> None:
@@ -653,3 +693,115 @@ class RingIntercomCamera(Camera):
                 _LOGGER.debug(
                     "Error closing live view %s", session_id, exc_info=True
                 )
+
+
+class RingIntercomDoorbellCamera(Camera):
+    """Still image for doorbell notifications, e.g. HomeKit's linked doorbell.
+
+    HomeKit sends the doorbell notification the instant the ding arrives and
+    asks for its picture right away, long before a capture (typically 1.5-3 s)
+    can be done. A camera serving a file then shows the previous visitor.
+
+    This camera holds a picture request that arrives within
+    DOORBELL_WINDOW_SECONDS of a ding until that ding's capture is done (it
+    starts one itself if nobody else has), so the notification is not delayed
+    but its picture is current. Requests outside that window only ever get the
+    last picture and never wake the battery-powered device: the Home app
+    refreshes camera tiles every few seconds while it is open.
+    """
+
+    def __init__(
+        self, device, camera: RingIntercomCamera, history: DingHistory | None
+    ) -> None:
+        """Initialize."""
+        super().__init__()
+        self._device = device
+        self._camera = camera
+        self._history = history
+        self._attr_name = f"{device.name} Doorbell"
+        self._attr_unique_id = f"ring_intercom_doorbell_{device.device_api_id}"
+        self._attr_brand = "Ring"
+        self._attr_model = "Intercom Video"
+        self._ding_time: float = 0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"last_ding": self._ding_time or None}
+
+    async def async_added_to_hass(self) -> None:
+        """Listen to the Ring integration's ding event entity."""
+        history_conf = (
+            self.hass.data.get(DOMAIN, {}).get(DATA_CONFIG, {}).get(CONF_HISTORY)
+            or {}
+        )
+        ding_entity = history_conf.get(CONF_DING_ENTITY) or find_ding_entity(
+            self.hass, self._device
+        )
+        if ding_entity is None:
+            _LOGGER.warning(
+                "Doorbell camera for %s: no ding event entity of the Ring "
+                "integration found; it will only serve the last picture. Set "
+                "ring_intercom_camera: history: ding_entity: to fix this",
+                self._device.name,
+            )
+            return
+        self.async_on_remove(
+            async_track_state_change_event(
+                self.hass, [ding_entity], self._handle_ding_state
+            )
+        )
+
+    @callback
+    def _handle_ding_state(self, event: Event[EventStateChangedData]) -> None:
+        """Start the capture for a ding (same filter as the ding history)."""
+        old, new = event.data["old_state"], event.data["new_state"]
+        if (
+            old is None
+            or new is None
+            or old.state == STATE_UNAVAILABLE
+            or new.state in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+        ):
+            return
+        self._ding_time = time.time()
+        self.async_write_ha_state()
+        # Start right away rather than on HomeKit's request: that request
+        # comes after the notification, and every millisecond counts here.
+        # The ding history and automations join this same capture.
+        self.hass.async_create_background_task(
+            self._camera.async_image_since(self._ding_time),
+            f"ring_intercom_camera doorbell capture {self._device.device_api_id}",
+        )
+
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Return this ding's picture, or outside a ding the last one."""
+        if time.time() - self._ding_time <= DOORBELL_WINDOW_SECONDS:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.shield(self._camera.async_image_since(self._ding_time)),
+                    DOORBELL_WAIT_SECONDS,
+                )
+            except TimeoutError:
+                _LOGGER.debug(
+                    "Doorbell camera for %s: no picture within %ds",
+                    self._device.name, DOORBELL_WAIT_SECONDS,
+                )
+                return None
+        return await self._async_last_image()
+
+    async def _async_last_image(self) -> bytes | None:
+        """Return the newest picture available without capturing."""
+        if image := self._camera.last_image:
+            return image
+        # After a restart the camera's cache is empty; the ding history still
+        # has the last visitor on disk.
+        if self._history is not None and (
+            entry := self._history.last_image_entry
+        ):
+            if path := self._history.image_path(entry):
+                try:
+                    return await self.hass.async_add_executor_job(path.read_bytes)
+                except OSError:
+                    return None
+        return None

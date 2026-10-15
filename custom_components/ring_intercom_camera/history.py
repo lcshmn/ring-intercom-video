@@ -34,7 +34,6 @@ from typing import Any
 
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
@@ -51,6 +50,7 @@ from .const import (
     DATA_HISTORIES,
     DOMAIN,
 )
+from .devices import find_ding_entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,21 +115,8 @@ class DingHistory:
         )
 
     def _find_ding_entity(self) -> str | None:
-        """Return the Ring integration's ding event entity for this device.
-
-        The Ring integration builds the unique id as "<device id>-ding"; the
-        entity id itself may have been renamed by the user.
-        """
-        registry = er.async_get(self._hass)
-        wanted = f"{self._device.device_api_id}-ding"
-        for entry in registry.entities.values():
-            if (
-                entry.platform == "ring"
-                and entry.domain == "event"
-                and entry.unique_id == wanted
-            ):
-                return entry.entity_id
-        return None
+        """Return the Ring integration's ding event entity for this device."""
+        return find_ding_entity(self._hass, self._device)
 
     def set_capture(self, capture: Callable[[], Awaitable[bytes | None]]) -> None:
         """Register the camera's request for a picture of this moment."""
