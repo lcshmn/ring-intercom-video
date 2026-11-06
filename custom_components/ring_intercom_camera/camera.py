@@ -28,11 +28,11 @@ from io import BytesIO
 from typing import Any
 
 from ring_doorbell.webrtcstream import RingWebRtcMessage
+from webrtc_models import RTCIceCandidateInit  # HA 2026.11: no longer exported by camera
 
 from homeassistant.components.camera import (
     Camera,
     CameraEntityFeature,
-    RTCIceCandidateInit,
     WebRTCAnswer,
     WebRTCCandidate,
     WebRTCError,
