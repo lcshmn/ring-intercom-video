@@ -319,6 +319,8 @@ entity: sensor.<device_name>_ding_history
 # title: Front door
 # max_entries: 30
 # image_entity / camera_entity: derived from entity, override if renamed
+# style: origami      # look of the Origami theme
+# show_header: false  # default: true, but false with style: origami
 ```
 
 The pictures stay behind authentication: the card asks Home Assistant for a signed, short-lived URL per

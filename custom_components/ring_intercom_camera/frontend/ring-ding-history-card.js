@@ -16,9 +16,11 @@
  *   camera_entity: camera.hauseingang_camera     # "Live" button; default: derived
  *   title: Hauseingang
  *   max_entries: 30
+ *   style: origami        # look of the Origami theme (github.com/hazymorning/origami)
+ *   show_header: false    # default: true, but false with style: origami
  */
 
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 // Signed media URLs are requested with this lifetime and renewed before expiry.
 const URL_LIFETIME_S = 3600;
@@ -159,6 +161,33 @@ const STYLE = `
   .lightbox button[disabled] { opacity: 0.3; cursor: default; }
 `;
 
+// Origami: the theme's radii, fills and spacing, rows like its lists with faint
+// dividers. Laid over STYLE; the theme variables fall back to sensible values.
+const ORIGAMI_STYLE = `
+  ha-card { padding: var(--ha-space-2, 8px); }
+  .hero { margin: 0; border-radius: var(--radius-inner, 12px); aspect-ratio: 16 / 10; background: var(--fill-subtle); }
+  .overlay { padding: 32px var(--ha-space-4, 16px) var(--ha-space-3, 12px); background: linear-gradient(transparent, rgba(0, 0, 0, 0.72)); }
+  .overlay .when { font-size: var(--ha-font-size-l, 18px); font-weight: var(--ha-font-weight-bold, 600); }
+  .overlay .ago { font-size: var(--ha-font-size-s, 12px); }
+  .live { top: var(--ha-space-3, 12px); right: var(--ha-space-3, 12px); padding: 6px 12px 6px 10px;
+          background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+          font-weight: var(--ha-font-weight-bold, 600); }
+  .timeline { padding: var(--ha-space-1, 4px) 0 0; }
+  .day { padding: var(--ha-space-4, 16px) var(--ha-space-3, 12px) var(--ha-space-1, 4px); text-transform: none;
+         letter-spacing: 0; font-size: var(--ha-font-size-s, 12px); font-weight: var(--ha-font-weight-bold, 600); }
+  .row { position: relative; gap: var(--ha-space-3, 12px); padding: var(--ha-space-2, 8px) var(--ha-space-3, 12px);
+         border-radius: var(--radius-inner, 12px); transition: background var(--duration-normal, .2s) ease; }
+  .row + .row::before { content: ''; position: absolute; top: 0; left: var(--ha-space-3, 12px); right: var(--ha-space-3, 12px);
+                        height: 1px; background: color-mix(in srgb, var(--primary-text-color) 8%, transparent); }
+  .row.has-image:hover { background: var(--fill-subtle, var(--secondary-background-color)); }
+  .row.has-image:hover::before, .row.has-image:hover + .row::before { display: none; }
+  .row.has-image:active { transform: scale(var(--press-scale, .98)); }
+  .thumb { width: 64px; height: 40px; border-radius: 8px; background: var(--fill-subtle); }
+  .row .time { font-size: var(--ha-font-size-m, 14px); font-weight: var(--ha-font-weight-bold, 600); }
+  .row .meta { font-size: var(--ha-font-size-s, 12px); }
+  .message { padding: var(--ha-space-3, 12px); }
+`;
+
 class RingDingHistoryCard extends HTMLElement {
   constructor() {
     super();
@@ -187,6 +216,8 @@ class RingDingHistoryCard extends HTMLElement {
       camera_entity: `camera.${base}_camera`,
       ...config,
     };
+    this._config.show_header ??= this._config.style !== "origami";
+    this._style = this._config.style === "origami" ? STYLE + ORIGAMI_STYLE : STYLE;
     this._signature = null;
     if (this._hass) this._render();
   }
@@ -324,7 +355,7 @@ class RingDingHistoryCard extends HTMLElement {
     const root = this.shadowRoot;
 
     if (!sensor) {
-      root.innerHTML = `<style>${STYLE}</style><ha-card><div class="message">${
+      root.innerHTML = `<style>${this._style}</style><ha-card><div class="message">${
         this._config.entity.startsWith("sensor.") && !states[this._config.image_entity]
           ? escapeHtml(t.historyOff)
           : escapeHtml(t.missing(this._config.entity))
@@ -348,8 +379,8 @@ class RingDingHistoryCard extends HTMLElement {
     const heroDate = heroEntry ? new Date(heroEntry.time) : null;
     const hasCamera = Boolean(states[this._config.camera_entity]);
 
-    let html = `<style>${STYLE}</style><ha-card>`;
-    html += `
+    let html = `<style>${this._style}</style><ha-card>`;
+    if (this._config.show_header) html += `
       <div class="header">
         <div class="badge"><ha-icon icon="mdi:doorbell-video"></ha-icon></div>
         <div class="heading">
